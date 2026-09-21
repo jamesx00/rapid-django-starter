@@ -31,169 +31,23 @@ def render(text: str, ctx: dict[str, str]) -> str:
     return text
 
 
-# --------------------------------------------------------------------------- templates
-# Paths use {{pkg}} / {{domain}} placeholders too; both are substituted before writing.
-
-FILES: dict[str, str] = {
-    ".gitignore": """\
-__pycache__/
-*.py[cod]
-.venv/
-db.sqlite3
-.env
-""",
-    # ---- package
-    "{{pkg}}/__init__.py": "",
-    # data: the only model-holding app
-    "{{pkg}}/data/__init__.py": "",
-    "{{pkg}}/data/apps.py": '''\
-from django.apps import AppConfig
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
 
-class DataConfig(AppConfig):
-    default_auto_field = "django.db.models.BigAutoField"
-    name = "{{pkg}}.data"
-    label = "data"
-''',
-    "{{pkg}}/data/models/__init__.py": '''\
-from .{{domain_singular}} import {{Model}}
-
-__all__ = ["{{Model}}"]
-''',
-    "{{pkg}}/data/models/{{domain_singular}}.py": '''\
-from django.db import models
-
-
-class {{Model}}(models.Model):
-    title = models.CharField(max_length=255)
-    body = models.TextField(blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return self.title
-''',
-    "{{pkg}}/data/admin.py": '''\
-from django.contrib import admin
-
-from .models import {{Model}}
-
-admin.site.register({{Model}})
-''',
-    "{{pkg}}/data/migrations/__init__.py": "",
-    # readers / actions: plain Python, not Django apps
-    "{{pkg}}/readers/__init__.py": "",
-    "{{pkg}}/readers/{{domain}}.py": '''\
-"""Read-only business logic for {{domain}}. No writes, no HTTP."""
-
-from {{pkg}}.data.models import {{Model}}
-
-
-def list_{{domain}}():
-    return {{Model}}.objects.order_by("-created_at")
-
-
-def get_{{domain_singular}}(pk: int) -> {{Model}}:
-    return {{Model}}.objects.get(pk=pk)
-''',
-    "{{pkg}}/actions/__init__.py": "",
-    "{{pkg}}/actions/{{domain}}.py": '''\
-"""State-changing business logic for {{domain}}. Interfaces call these rather than
-constructing/saving models inline."""
-
-from {{pkg}}.data.models import {{Model}}
-
-
-def create_{{domain_singular}}(*, title: str, body: str = "") -> {{Model}}:
-    return {{Model}}.objects.create(title=title, body=body)
-''',
-    # interfaces
-    "{{pkg}}/interfaces/__init__.py": "",
-    "{{pkg}}/interfaces/http/__init__.py": "",
-    "{{pkg}}/interfaces/http/{{domain}}.py": '''\
-"""Thin function-based views. No business logic here: call readers/actions."""
-
-from django.http import Http404, JsonResponse
-
-from {{pkg}}.data.models import {{Model}}
-from {{pkg}}.readers import {{domain}} as readers
-
-
-def {{domain_singular}}_list(request):
-    items = [{"id": n.pk, "title": n.title} for n in readers.list_{{domain}}()]
-    return JsonResponse({"{{domain}}": items})
-
-
-def {{domain_singular}}_detail(request, pk):
-    try:
-        item = readers.get_{{domain_singular}}(pk)
-    except {{Model}}.DoesNotExist:
-        raise Http404
-    return JsonResponse({"id": item.pk, "title": item.title, "body": item.body})
-''',
-    "{{pkg}}/interfaces/http/urls.py": '''\
-from django.urls import path
-
-from . import {{domain}}
-
-app_name = "{{domain}}"
-
-urlpatterns = [
-    path("{{domain}}/", {{domain}}.{{domain_singular}}_list, name="{{domain_singular}}_list"),
-    path("{{domain}}/<int:pk>/", {{domain}}.{{domain_singular}}_detail, name="{{domain_singular}}_detail"),
-]
-''',
-    "{{pkg}}/interfaces/management_commands/__init__.py": "",
-    "{{pkg}}/interfaces/management_commands/apps.py": '''\
-from django.apps import AppConfig
-
-
-class ManagementCommandsConfig(AppConfig):
-    name = "{{pkg}}.interfaces.management_commands"
-    label = "management_commands"
-''',
-    "{{pkg}}/interfaces/management_commands/management/__init__.py": "",
-    "{{pkg}}/interfaces/management_commands/management/commands/__init__.py": "",
-    # docs
-    "docs/adr/0001-rapid-layering-and-function-based-views.md": """\
-# 0001. RAPID layering, function-based views only
-
-## Status
-
-Accepted
-
-## Decision
-
-Structure the project horizontally by concern, not vertically by domain. There is no
-per-domain Django app. One top-level `{{pkg}}` package holds:
-
-- `{{pkg}}/data/` - the only model-holding Django app. One model per file under
-  `data/models/`, re-exported from `data/models/__init__.py`. `admin.py` lives here too.
-- `{{pkg}}/readers/` - plain Python. Read-only business logic, one file per domain.
-- `{{pkg}}/actions/` - plain Python. State-changing business logic, one file per domain.
-- `{{pkg}}/interfaces/http/` - thin views only, one file per domain, plus `urls.py`.
-- `{{pkg}}/interfaces/management_commands/` - the other registered Django app, solely so
-  command discovery finds `management/commands/*.py`.
-
-Only `{{pkg}}.data` and `{{pkg}}.interfaces.management_commands` are in `INSTALLED_APPS`.
-
-Views are function-based only, never class-based. Preconditions use decorators, not mixins.
-Shared behavior is composed via helper functions, not inheritance.
-
-## Consequences
-
-- A new domain concept gets a new file in `readers/`, `actions/`, `interfaces/http/` and
-  `data/models/` - never a new Django app.
-- Tests target `readers/` and `actions/` directly; views have no independent logic.
-""",
-    "CLAUDE.md": """\
-## Architecture
-
-RAPID layering, horizontal by concern - no per-domain Django apps. One `{{pkg}}` package
-with `data/` (the only model-holding app), `readers/`, `actions/`, and `interfaces/http/` +
-`interfaces/management_commands/` (the other registered app). Function-based views only,
-never class-based. See `docs/adr/0001-rapid-layering-and-function-based-views.md`.
-""",
-}
+def render_tree(root: Path, ctx: dict[str, str]) -> int:
+    """Copy templates/ into root, substituting __name__ in paths and {{name}} in contents."""
+    count = 0
+    for src in sorted(TEMPLATES_DIR.rglob("*")):
+        if not src.is_file() or "__pycache__" in src.parts:
+            continue
+        rel = str(src.relative_to(TEMPLATES_DIR))
+        for key, value in ctx.items():
+            rel = rel.replace(f"__{key}__", value)
+        dest = root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(render(src.read_text(), ctx))
+        count += 1
+    return count
 
 
 def to_identifier(name: str) -> str:
@@ -272,11 +126,7 @@ def main() -> None:
     patch_settings(root / "config" / "settings.py", pkg)
     patch_urls(root / "config" / "urls.py", pkg)
 
-    for rel, content in FILES.items():
-        path = root / render(rel, ctx)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render(content, ctx))
-    print(f"wrote {len(FILES)} files to {root}")
+    print(f"wrote {render_tree(root, ctx)} files to {root}")
 
     run(["uv", "run", "python", "manage.py", "makemigrations", "data"], root)
     run(["uv", "run", "python", "manage.py", "check"], root)
